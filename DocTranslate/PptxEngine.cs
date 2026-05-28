@@ -185,6 +185,14 @@ public static class PptxEngine
             .Descendants<DocumentFormat.OpenXml.Presentation.Picture>()
             .ToList();
 
+        // Find the highest existing shape ID on this slide so new shapes get unique IDs.
+        var spTree = slidePart.Slide.CommonSlideData!.ShapeTree!;
+        uint nextId = spTree
+            .Descendants<DocumentFormat.OpenXml.Presentation.NonVisualDrawingProperties>()
+            .Select(p => (uint)(p.Id ?? 0))
+            .DefaultIfEmpty(0u)
+            .Max() + 1;
+
         foreach (var pic in pictures)
         {
             var blip = pic.Descendants<DocumentFormat.OpenXml.Drawing.Blip>().FirstOrDefault();
@@ -217,26 +225,24 @@ public static class PptxEngine
             long extY = xfrm?.Extents?.Cy ?? 914400L;  // default ~1 inch tall
 
             // Add a text box shape immediately below the picture.
-            long tbY    = offY + extY + 91440L; // 0.1 inch gap
-            long tbH    = 457200L;              // 0.5 inch tall
-            var  spTree = slidePart.Slide.CommonSlideData!.ShapeTree!;
+            long tbY = offY + extY + 91440L; // 0.1 inch gap
+            long tbH = 457200L;              // 0.5 inch tall
 
-            var sp = BuildTextShape(translated, offX, tbY, extX, tbH);
-            spTree.Append(sp);
+            spTree.Append(BuildTextShape(translated, offX, tbY, extX, tbH, nextId++));
         }
     }
 
     private static DocumentFormat.OpenXml.Presentation.Shape BuildTextShape(
-        string text, long x, long y, long cx, long cy)
+        string text, long x, long y, long cx, long cy, uint id)
     {
         var shape = new DocumentFormat.OpenXml.Presentation.Shape();
 
         shape.NonVisualShapeProperties = new DocumentFormat.OpenXml.Presentation.NonVisualShapeProperties(
-            new DocumentFormat.OpenXml.Presentation.NonVisualDrawingProperties { Id = 9000, Name = "OcrCaption" },
+            new DocumentFormat.OpenXml.Presentation.NonVisualDrawingProperties
+                { Id = id, Name = $"OcrCaption{id}" },
             new DocumentFormat.OpenXml.Presentation.NonVisualShapeDrawingProperties(
                 new DocumentFormat.OpenXml.Drawing.ShapeLocks { NoGrouping = true }),
-            new DocumentFormat.OpenXml.Presentation.ApplicationNonVisualDrawingProperties(
-                new DocumentFormat.OpenXml.Presentation.PlaceholderShape()));
+            new DocumentFormat.OpenXml.Presentation.ApplicationNonVisualDrawingProperties());
 
         shape.ShapeProperties = new DocumentFormat.OpenXml.Presentation.ShapeProperties(
             new DocumentFormat.OpenXml.Drawing.Transform2D(

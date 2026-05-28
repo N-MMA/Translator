@@ -107,7 +107,7 @@ public partial class MainWindow : Window
         string toCode = Languages.TryGetValue(tgtName, out var tv) ? tv.To : "pt";
 
         if (fromCode == toCode)
-        { ModelStatus.Text="#7B80A0"; ModelStatus.Foreground=new SolidColorBrush(Color.FromRgb(0xFF,0x9F,0x43)); return; }
+        { ModelStatus.Text="  ⚠  Source and target language are the same"; ModelStatus.Foreground=new SolidColorBrush(Color.FromRgb(0xFF,0x9F,0x43)); return; }
 
         var pairs  = await _bridge.GetInstalledPairsAsync();
         bool direct = pairs.Any(p => p.From==fromCode && p.To==toCode);
