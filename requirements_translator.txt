@@ -1,14 +1,20 @@
 # DocTranslate — Python Translation Microservice
-# Install with: pip install -r requirements_translator.txt
 #
-# This is the ONLY Python component — it handles Argos Translate.
-# Everything else (GUI, DOCX, PDF) is handled by the C# WPF app.
+# IMPORTANT — install CPU-only PyTorch first to avoid downloading 2 GB of
+# CUDA packages (argostranslate depends on stanza which depends on torch):
 #
-# WHY ARGOS TRANSLATE (not an LLM):
-#   - Purpose-built seq2seq translation model — fast and consistent
-#   - Uses CTranslate2 runtime — CPU-optimised with int8 quantization
-#   - ~200MB RAM per language model
-#   - 2–5 seconds per page on old CPU (pre-2018)
-#   - 43 languages + automatic pivoting between installed pairs
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements_translator.txt
+#
+# run.bat does this automatically. Only follow the manual steps above if
+# you are installing without run.bat.
 
+# Translation engine
 argostranslate>=1.9.0
+
+# OCR — reads text from image-only PDF pages and embedded images
+# Uses the torch that is already installed above; no extra binary needed.
+easyocr>=1.7.0
+
+# PDF rasterisation for OCR (converts PDF pages to images)
+pymupdf>=1.23.0

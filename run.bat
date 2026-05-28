@@ -35,11 +35,26 @@ echo  Found: Python %PY_VER%
 
 :: ── Install Python translation deps ──────────────────────────────────────────
 echo.
-echo  Installing Python translation engine (Argos Translate)...
+echo  Installing Python dependencies...
+echo.
+
+:: Install CPU-only PyTorch first.
+:: argostranslate depends on stanza which depends on torch.  Without this step
+:: pip defaults to the CUDA wheel (~2 GB) which fails or is unusable on CPU machines.
+echo  [1/2] Installing CPU-only PyTorch (prevents ~2 GB CUDA download)...
+python -m pip install torch --index-url https://download.pytorch.org/whl/cpu --quiet --disable-pip-version-check
+if errorlevel 1 (
+    echo  [WARN] Could not install from PyTorch CPU index — falling back to default.
+    echo         If the next step downloads CUDA packages, re-run this script.
+)
+
+echo  [2/2] Installing translation + OCR packages...
 python -m pip install -r requirements_translator.txt --quiet --disable-pip-version-check
 if errorlevel 1 (
     echo  [ERROR] Failed to install Python dependencies.
-    echo  Try: pip install -r requirements_translator.txt
+    echo  Try manually:
+    echo    pip install torch --index-url https://download.pytorch.org/whl/cpu
+    echo    pip install -r requirements_translator.txt
     pause & exit /b 1
 )
 echo  Python dependencies ready.

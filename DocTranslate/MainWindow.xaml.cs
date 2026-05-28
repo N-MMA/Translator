@@ -187,11 +187,21 @@ public partial class MainWindow : Window
     {
         StatusText.Text="Extracting text blocks from PDF…";
         _pdfBlocks=await Task.Run(()=>PdfEngine.ExtractBlocks(_srcPath!));
+
+        // OCR fallback: pages with no extractable text (image-only / scanned tables)
+        // are rasterised by Python/PyMuPDF, read by EasyOCR and pre-translated.
+        StatusText.Text="Scanning for image-only pages (OCR)…";
+        var ocrProgress=new Progress<(int Done,int Total)>(p=>
+            StatusText.Text=$"OCR: page {p.Done}/{p.Total}…");
+        await PdfEngine.FillWithOcrAsync(_srcPath!,_pdfBlocks,_bridge,from,to,ocrProgress);
+
+        // Translate text-extracted blocks (OCR blocks already carry a translation).
         int total=_pdfBlocks.Count;
         for(int i=0;i<_pdfBlocks.Count;i++)
         {
-            _pdfBlocks[i].Translated=await _bridge.TranslateAsync(
-                _pdfBlocks[i].Original,from,to);
+            if(string.IsNullOrEmpty(_pdfBlocks[i].Translated))
+                _pdfBlocks[i].Translated=await _bridge.TranslateAsync(
+                    _pdfBlocks[i].Original,from,to);
             progress.Report((i+1,total));
         }
         ProgressBar.Value=100;

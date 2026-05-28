@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Globalization;
+using System.Threading.Tasks;
 using PdfSharp.Drawing;
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
@@ -131,6 +133,61 @@ public static class PdfEngine
         }
         return blocks;
     }
+
+    /// <summary>
+    /// After text extraction, fill in pages that had no/sparse text by running
+    /// OCR via the Python microservice (EasyOCR + PyMuPDF).
+    /// Call this before the review window so OCR results are editable too.
+    /// </summary>
+    public static async Task FillWithOcrAsync(
+        string srcPath,
+        List<PdfTextBlock> blocks,
+        TranslatorBridge bridge,
+        string fromCode,
+        string toCode,
+        IProgress<(int Done, int Total)>? progress = null)
+    {
+        int pageCount;
+        using (var doc = PdfReader.Open(srcPath, PdfDocumentOpenMode.ReadOnly))
+            pageCount = doc.PageCount;
+
+        var fromLangs = new[] { fromCode };
+
+        for (int pi = 0; pi < pageCount; pi++)
+        {
+            var pageBlocks = blocks.Where(b => b.PageIndex == pi).ToList();
+            if (PageHasSparseText(pageBlocks))
+            {
+                var (_, translated) = await bridge.OcrPdfPageAsync(
+                    srcPath, pi, fromLangs, toCode);
+                if (!string.IsNullOrWhiteSpace(translated))
+                {
+                    double pw, ph;
+                    using (var doc = PdfReader.Open(srcPath, PdfDocumentOpenMode.ReadOnly))
+                    {
+                        var page = doc.Pages[pi];
+                        pw = page.Width.Point;
+                        ph = page.Height.Point;
+                    }
+                    blocks.Add(new PdfTextBlock {
+                        PageIndex  = pi,
+                        X          = 36,
+                        Y          = 36,
+                        Width      = pw - 72,
+                        Height     = ph - 72,
+                        Original   = "",
+                        Translated = translated,
+                        FontSize   = 10,
+                    });
+                }
+            }
+            progress?.Report((pi + 1, pageCount));
+        }
+    }
+
+    // A page is "sparse" (image-only) when its extracted text totals fewer than 20 chars.
+    private static bool PageHasSparseText(List<PdfTextBlock> pageBlocks)
+        => pageBlocks.Sum(b => b.Original.Length) < 20;
 
     public static string RenderOverlay(string srcPath, List<PdfTextBlock> blocks)
     {
