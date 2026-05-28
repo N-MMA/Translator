@@ -57,8 +57,14 @@ public partial class MainWindow : Window
     {
         SetBanner("Starting translation engine…", "#FF9F43");
         bool wordAvail = DocxEngine.IsWordAvailable();
-        WordBadge.Text      = wordAvail ? "● Word COM" : "● OpenXML fallback";
+        WordBadge.Text       = wordAvail ? "● Word COM" : "● Word: OpenXML";
         WordBadge.Foreground = new SolidColorBrush(wordAvail
+            ? Color.FromRgb(0x43,0xD9,0xAD)
+            : Color.FromRgb(0xFF,0x9F,0x43));
+
+        bool pptAvail = PptxEngine.IsPowerPointAvailable();
+        PptBadge.Text       = pptAvail ? "● PowerPoint COM" : "● PPT: OpenXML";
+        PptBadge.Foreground = new SolidColorBrush(pptAvail
             ? Color.FromRgb(0x43,0xD9,0xAD)
             : Color.FromRgb(0xFF,0x9F,0x43));
 
@@ -119,12 +125,12 @@ public partial class MainWindow : Window
     private async void OnBrowse(object sender, RoutedEventArgs e)
     {
         var dlg = new OpenFileDialog
-        { Filter="Supported Documents|*.docx;*.pdf|Word Documents|*.docx|PDF Files|*.pdf" };
+        { Filter="Supported Documents|*.docx;*.pdf;*.pptx|Word Documents|*.docx|PDF Files|*.pdf|PowerPoint Presentations|*.pptx" };
         if (dlg.ShowDialog() != true) return;
         _srcPath=dlg.FileName; _outPath=null; _pdfBlocks=null;
         SaveBtn.IsEnabled=false; ProgressBar.Value=0;
         string ext=Path.GetExtension(_srcPath).ToLower();
-        _fileType = ext==".pdf" ? "pdf" : "docx";
+        _fileType = ext==".pdf" ? "pdf" : ext==".pptx" ? "pptx" : "docx";
         FileLabel.Text=Path.GetFileName(_srcPath);
         FileLabel.Foreground=new SolidColorBrush(Color.FromRgb(0xE8,0xEA,0xF6));
         TypeBadge.Visibility=Visibility.Visible;
@@ -134,6 +140,12 @@ public partial class MainWindow : Window
             TypeBadge.Background=new SolidColorBrush(Color.FromRgb(0xFF,0x9F,0x43));
             TypeBadgeText.Text="  PDF  "; TypeBadgeText.Foreground=new SolidColorBrush(Color.FromRgb(0x1A,0x0A,0x00));
             FileInfo.Text=$"  ✔  {kb} KB — pages flattened to image, text overlaid";
+        }
+        else if (_fileType=="pptx")
+        {
+            TypeBadge.Background=new SolidColorBrush(Color.FromRgb(0xD0,0x41,0x27));
+            TypeBadgeText.Text="  PPTX  "; TypeBadgeText.Foreground=new SolidColorBrush(Colors.White);
+            FileInfo.Text=$"  ✔  {kb} KB — {(PptxEngine.IsPowerPointAvailable()?"PowerPoint COM — full fidelity":"OpenXML fallback")}";
         }
         else
         {
@@ -163,8 +175,9 @@ public partial class MainWindow : Window
         });
         try
         {
-            if (_fileType=="pdf") await TranslatePdfAsync(fromCode,toCode,tgtName,progress);
-            else                  await TranslateDocxAsync(fromCode,toCode,tgtName,progress);
+            if      (_fileType=="pdf")  await TranslatePdfAsync(fromCode,toCode,tgtName,progress);
+            else if (_fileType=="pptx") await TranslatePptxAsync(fromCode,toCode,tgtName,progress);
+            else                        await TranslateDocxAsync(fromCode,toCode,tgtName,progress);
         }
         catch(Exception ex)
         {
@@ -172,6 +185,14 @@ public partial class MainWindow : Window
             StatusText.Text="❌  Error during translation.";
         }
         finally { _running=false; TranslateBtn.IsEnabled=true; }
+    }
+
+    private async Task TranslatePptxAsync(string from,string to,string tgtName,
+        IProgress<(int,int)> progress)
+    {
+        _outPath=await PptxEngine.TranslateAsync(_srcPath!,from,to,_bridge,progress);
+        ProgressBar.Value=100; SaveBtn.IsEnabled=true;
+        StatusText.Text=$"✅  Translation to {tgtName} complete — click Save.";
     }
 
     private async Task TranslateDocxAsync(string from,string to,string tgtName,
@@ -221,10 +242,10 @@ public partial class MainWindow : Window
         if(_outPath is null) return;
         string stem=Path.GetFileNameWithoutExtension(_srcPath??"document");
         string lang=(TgtLangBox.SelectedItem?.ToString()??"").Split(' ').Last().Trim();
-        string ext=_fileType=="pdf"?".pdf":".docx";
+        string ext=_fileType=="pdf"?".pdf":_fileType=="pptx"?".pptx":".docx";
         var dlg=new SaveFileDialog
         { FileName=$"{stem}_{lang}{ext}", DefaultExt=ext,
-          Filter=_fileType=="pdf"?"PDF Files|*.pdf":"Word Documents|*.docx" };
+          Filter=_fileType=="pdf"?"PDF Files|*.pdf":_fileType=="pptx"?"PowerPoint Presentations|*.pptx":"Word Documents|*.docx" };
         if(dlg.ShowDialog()!=true) return;
         try { File.Copy(_outPath,dlg.FileName,true); MessageBox.Show($"Saved:\n{dlg.FileName}","Saved"); }
         catch(Exception ex){ MessageBox.Show($"Save failed:\n{ex.Message}","Error",MessageBoxButton.OK,MessageBoxImage.Error); }
