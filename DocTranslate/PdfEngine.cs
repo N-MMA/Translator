@@ -135,8 +135,10 @@ public static class PdfEngine
     }
 
     /// <summary>
-    /// After text extraction, fill in pages that had no/sparse text by running
-    /// OCR via the Python microservice (EasyOCR + PyMuPDF).
+    /// For every page: rasterize via Python/PyMuPDF, OCR via Windows.Media.Ocr,
+    /// then overlay translated text at the exact bounding-box of each OCR line.
+    /// On pages where PdfSharp already extracted text, only OCR lines that don't
+    /// overlap any extracted block are treated as image-sourced and translated.
     /// Call this before the review window so OCR results are editable too.
     /// </summary>
     public static async Task FillWithOcrAsync(
@@ -148,46 +150,74 @@ public static class PdfEngine
         IProgress<(int Done, int Total)>? progress = null)
     {
         int pageCount;
+        var pageDims = new List<(double W, double H)>();
         using (var doc = PdfReader.Open(srcPath, PdfDocumentOpenMode.ReadOnly))
+        {
             pageCount = doc.PageCount;
-
-        var fromLangs = new[] { fromCode };
+            for (int i = 0; i < pageCount; i++)
+                pageDims.Add((doc.Pages[i].Width.Point, doc.Pages[i].Height.Point));
+        }
 
         for (int pi = 0; pi < pageCount; pi++)
         {
-            var pageBlocks = blocks.Where(b => b.PageIndex == pi).ToList();
-            if (PageHasSparseText(pageBlocks))
+            var (pw, ph) = pageDims[pi];
+            var existing = blocks.Where(b => b.PageIndex == pi).ToList();
+            bool sparse  = existing.Sum(b => b.Original.Length) < 20;
+
+            // Rasterize the page to a temp PNG via Python/PyMuPDF.
+            var (imgPath, _, _, dpi) = await bridge.RasterizePdfPageAsync(srcPath, pi);
+            if (string.IsNullOrEmpty(imgPath))
             {
-                var (_, translated) = await bridge.OcrPdfPageAsync(
-                    srcPath, pi, fromLangs, toCode);
-                if (!string.IsNullOrWhiteSpace(translated))
+                progress?.Report((pi + 1, pageCount));
+                continue;
+            }
+
+            try
+            {
+                var ocrLines = await WinOcrEngine.RecognizeFileAsync(imgPath, fromCode, dpi);
+
+                foreach (var line in ocrLines)
                 {
-                    double pw, ph;
-                    using (var doc = PdfReader.Open(srcPath, PdfDocumentOpenMode.ReadOnly))
-                    {
-                        var page = doc.Pages[pi];
-                        pw = page.Width.Point;
-                        ph = page.Height.Point;
-                    }
+                    // Image coordinates: y is from top.  PDF overlay: Y is also from top (see ParseStream).
+                    // Skip lines already covered by PdfSharp-extracted text (within 5 pt tolerance).
+                    if (!sparse && existing.Any(b => Overlaps(b, line, tolerance: 5)))
+                        continue;
+
+                    var translated = await bridge.TranslateAsync(line.Text, fromCode, toCode);
+                    if (string.IsNullOrWhiteSpace(translated)) continue;
+
+                    // Clamp to page bounds with a small margin.
+                    double x = Math.Max(line.X, 2);
+                    double y = Math.Max(line.Y, 2);
+                    double w = Math.Min(line.W, pw - x - 2);
+                    double h = Math.Max(line.H, 10);
+
                     blocks.Add(new PdfTextBlock {
                         PageIndex  = pi,
-                        X          = 36,
-                        Y          = 36,
-                        Width      = pw - 72,
-                        Height     = ph - 72,
-                        Original   = "",
+                        X          = x,
+                        Y          = y,
+                        Width      = w,
+                        Height     = h,
+                        Original   = line.Text,
                         Translated = translated,
-                        FontSize   = 10,
+                        FontSize   = Math.Max(Math.Round(h * 0.72), 7),
                     });
                 }
             }
+            finally
+            {
+                try { File.Delete(imgPath); } catch { }
+            }
+
             progress?.Report((pi + 1, pageCount));
         }
     }
 
-    // A page is "sparse" (image-only) when its extracted text totals fewer than 20 chars.
-    private static bool PageHasSparseText(List<PdfTextBlock> pageBlocks)
-        => pageBlocks.Sum(b => b.Original.Length) < 20;
+    private static bool Overlaps(PdfTextBlock b, OcrLine line, double tolerance)
+        => b.X - tolerance         < line.X + line.W &&
+           b.X + b.Width + tolerance > line.X &&
+           b.Y - tolerance         < line.Y + line.H &&
+           b.Y + b.Height + tolerance > line.Y;
 
     public static string RenderOverlay(string srcPath, List<PdfTextBlock> blocks)
     {

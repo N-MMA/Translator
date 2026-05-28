@@ -12,9 +12,6 @@
 # Translation engine
 argostranslate>=1.9.0
 
-# OCR — reads text from image-only PDF pages and embedded images
-# Uses the torch that is already installed above; no extra binary needed.
-easyocr>=1.7.0
-
-# PDF rasterisation for OCR (converts PDF pages to images)
+# PDF rasterisation — converts PDF pages to images for OCR.
+# OCR itself runs via Windows.Media.Ocr (built into Windows 10/11, CPU-native).
 pymupdf>=1.23.0

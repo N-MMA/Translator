@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using DocumentFormat.OpenXml.Presentation;
 
 namespace DocTranslate;
 
@@ -165,9 +166,95 @@ public static class PptxEngine
             progress?.Report((done, total));
         }
 
+        // OCR every embedded image on each slide and add a translated text shape.
+        foreach (var sp in slideParts)
+            await OcrAndInsertPptxImagesAsync(sp, fromCode, toCode, bridge);
+
         foreach (var sp in slideParts)
             sp.Slide.Save();
 
         return tmp;
+    }
+
+    private static async Task OcrAndInsertPptxImagesAsync(
+        DocumentFormat.OpenXml.Packaging.SlidePart slidePart,
+        string fromCode, string toCode, TranslatorBridge bridge)
+    {
+        // Find all picture shapes (<p:pic>) in the slide.
+        var pictures = slidePart.Slide
+            .Descendants<DocumentFormat.OpenXml.Presentation.Picture>()
+            .ToList();
+
+        foreach (var pic in pictures)
+        {
+            var blip = pic.Descendants<DocumentFormat.OpenXml.Drawing.Blip>().FirstOrDefault();
+            if (blip?.Embed?.Value is not { } relId) continue;
+
+            if (slidePart.GetPartById(relId) is not DocumentFormat.OpenXml.Packaging.ImagePart imgPart)
+                continue;
+
+            byte[] imgBytes;
+            using (var s = imgPart.GetStream())
+            {
+                using var ms = new MemoryStream();
+                s.CopyTo(ms);
+                imgBytes = ms.ToArray();
+            }
+
+            var lines = await WinOcrEngine.RecognizeBytesAsync(imgBytes, fromCode);
+            if (lines.Count == 0) continue;
+
+            var ocrText    = string.Join(" ", lines.Select(l => l.Text));
+            var translated = await bridge.TranslateAsync(ocrText, fromCode, toCode);
+            if (string.IsNullOrWhiteSpace(translated)) continue;
+
+            // Get the picture's position and size from its transform so we can
+            // place the text box directly below it.
+            var xfrm = pic.Descendants<DocumentFormat.OpenXml.Drawing.Transform2D>().FirstOrDefault();
+            long offX = xfrm?.Offset?.X ?? 457200L;   // default ~0.5 inch in EMUs
+            long offY = xfrm?.Offset?.Y ?? 457200L;
+            long extX = xfrm?.Extents?.Cx ?? 2743200L; // default ~3 inch wide
+            long extY = xfrm?.Extents?.Cy ?? 914400L;  // default ~1 inch tall
+
+            // Add a text box shape immediately below the picture.
+            long tbY    = offY + extY + 91440L; // 0.1 inch gap
+            long tbH    = 457200L;              // 0.5 inch tall
+            var  spTree = slidePart.Slide.CommonSlideData!.ShapeTree!;
+
+            var sp = BuildTextShape(translated, offX, tbY, extX, tbH);
+            spTree.Append(sp);
+        }
+    }
+
+    private static DocumentFormat.OpenXml.Presentation.Shape BuildTextShape(
+        string text, long x, long y, long cx, long cy)
+    {
+        var shape = new DocumentFormat.OpenXml.Presentation.Shape();
+
+        shape.NonVisualShapeProperties = new DocumentFormat.OpenXml.Presentation.NonVisualShapeProperties(
+            new DocumentFormat.OpenXml.Presentation.NonVisualDrawingProperties { Id = 9000, Name = "OcrCaption" },
+            new DocumentFormat.OpenXml.Presentation.NonVisualShapeDrawingProperties(
+                new DocumentFormat.OpenXml.Drawing.ShapeLocks { NoGrouping = true }),
+            new DocumentFormat.OpenXml.Presentation.ApplicationNonVisualDrawingProperties(
+                new DocumentFormat.OpenXml.Presentation.PlaceholderShape()));
+
+        shape.ShapeProperties = new DocumentFormat.OpenXml.Presentation.ShapeProperties(
+            new DocumentFormat.OpenXml.Drawing.Transform2D(
+                new DocumentFormat.OpenXml.Drawing.Offset { X = x, Y = y },
+                new DocumentFormat.OpenXml.Drawing.Extents { Cx = cx, Cy = cy }),
+            new DocumentFormat.OpenXml.Drawing.PresetGeometry(
+                new DocumentFormat.OpenXml.Drawing.AdjustValueList())
+                { Preset = DocumentFormat.OpenXml.Drawing.ShapeTypeValues.Rectangle });
+
+        shape.TextBody = new DocumentFormat.OpenXml.Presentation.TextBody(
+            new DocumentFormat.OpenXml.Drawing.BodyProperties(),
+            new DocumentFormat.OpenXml.Drawing.ListStyle(),
+            new DocumentFormat.OpenXml.Drawing.Paragraph(
+                new DocumentFormat.OpenXml.Drawing.Run(
+                    new DocumentFormat.OpenXml.Drawing.RunProperties
+                        { Language = "pt-PT", FontSize = 1000, Italic = true },
+                    new DocumentFormat.OpenXml.Drawing.Text(text))));
+
+        return shape;
     }
 }

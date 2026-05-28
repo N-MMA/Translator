@@ -137,7 +137,66 @@ public static class DocxEngine
             done++;
             progress?.Report((done, total));
         }
+
+        // OCR every embedded image and insert a translated caption paragraph after it.
+        await OcrAndInsertDocxImagesAsync(pkg, fromCode, toCode, bridge);
+
         pkg.MainDocumentPart.Document.Save();
         return tmp;
+    }
+
+    private static async Task OcrAndInsertDocxImagesAsync(
+        DocumentFormat.OpenXml.Packaging.WordprocessingDocument pkg,
+        string fromCode, string toCode, TranslatorBridge bridge)
+    {
+        var mainPart = pkg.MainDocumentPart!;
+
+        // Find all Drawing elements that reference an image part via blip r:embed.
+        var drawings = mainPart.Document.Body!
+            .Descendants<DocumentFormat.OpenXml.Wordprocessing.Drawing>()
+            .ToList();
+
+        foreach (var drawing in drawings)
+        {
+            // Get the relationship ID of the embedded image.
+            var blip = drawing.Descendants<DocumentFormat.OpenXml.Drawing.Blip>().FirstOrDefault();
+            if (blip?.Embed?.Value is not { } relId) continue;
+
+            if (mainPart.GetPartById(relId) is not DocumentFormat.OpenXml.Packaging.ImagePart imgPart)
+                continue;
+
+            byte[] imgBytes;
+            using (var s = imgPart.GetStream()) imgBytes = ReadAllBytes(s);
+
+            var lines = await WinOcrEngine.RecognizeBytesAsync(imgBytes, fromCode);
+            if (lines.Count == 0) continue;
+
+            var ocrText = string.Join(" ", lines.Select(l => l.Text));
+            var translated = await bridge.TranslateAsync(ocrText, fromCode, toCode);
+            if (string.IsNullOrWhiteSpace(translated)) continue;
+
+            // Insert a new paragraph with the translated text immediately after
+            // the paragraph containing this drawing.
+            var parentPara = drawing.Ancestors<DocumentFormat.OpenXml.Wordprocessing.Paragraph>()
+                                    .FirstOrDefault();
+            if (parentPara is null) continue;
+
+            var newPara = new DocumentFormat.OpenXml.Wordprocessing.Paragraph(
+                new DocumentFormat.OpenXml.Wordprocessing.Run(
+                    new DocumentFormat.OpenXml.Wordprocessing.RunProperties(
+                        new DocumentFormat.OpenXml.Wordprocessing.Italic(),
+                        new DocumentFormat.OpenXml.Wordprocessing.Color { Val = "555555" }),
+                    new DocumentFormat.OpenXml.Wordprocessing.Text(translated)
+                        { Space = DocumentFormat.OpenXml.SpaceProcessingModeValues.Preserve }
+                ));
+            parentPara.InsertAfterSelf(newPara);
+        }
+    }
+
+    private static byte[] ReadAllBytes(Stream s)
+    {
+        using var ms = new MemoryStream();
+        s.CopyTo(ms);
+        return ms.ToArray();
     }
 }

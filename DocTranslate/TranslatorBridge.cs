@@ -15,11 +15,11 @@ public class TranslatorBridge : IDisposable
 {
     private Process?      _process;
     private StreamWriter? _stdin;
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<string>>                   _pending    = new();
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonArray>>               _cmdPending = new();
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<(string Text, string Translated)>> _ocrPending = new();
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<string>>    _pending     = new();
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonArray>> _cmdPending  = new();
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<(string Path, int W, int H, int Dpi)>> _rasterPending = new();
     private int  _idCounter;
-    private int  _ocrCounter;
+    private int  _rasterCounter;
     private bool _ready;
     public  bool IsReady => _ready;
 
@@ -67,17 +67,24 @@ public class TranslatorBridge : IDisposable
                     if (obj["id"] is { } idNode)
                     {
                         var id = idNode.GetValue<string>();
-                        // OCR responses carry "text"+"translated"; text-translate responses carry "result"
-                        if (id.StartsWith("ocr_"))
+
+                        // Rasterize responses carry "path", "width", "height", "dpi"
+                        if (id.StartsWith("r_"))
                         {
-                            if (_ocrPending.TryRemove(id, out var ocrtcs))
+                            if (_rasterPending.TryRemove(id, out var rtcs))
                             {
-                                var text  = obj["text"]?.GetValue<string>()       ?? "";
-                                var trans = obj["translated"]?.GetValue<string>() ?? "";
-                                ocrtcs.TrySetResult((text, trans));
+                                if (obj["error"] is not null)
+                                    rtcs.TrySetResult(("", 0, 0, 0));
+                                else
+                                    rtcs.TrySetResult((
+                                        obj["path"]?.GetValue<string>() ?? "",
+                                        obj["width"]?.GetValue<int>()   ?? 0,
+                                        obj["height"]?.GetValue<int>()  ?? 0,
+                                        obj["dpi"]?.GetValue<int>()     ?? 150));
                             }
                             continue;
                         }
+
                         if (_pending.TryRemove(id, out var tcs))
                         {
                             if (obj["error"] is { } err)
@@ -87,10 +94,10 @@ public class TranslatorBridge : IDisposable
                         }
                         continue;
                     }
-                    if (obj["pairs"]  is JsonArray pairs) { if (_cmdPending.TryRemove("installed_pairs",    out var t1)) t1.TrySetResult(pairs);  continue; }
-                    if (obj["packages"] is JsonArray pkgs){ if (_cmdPending.TryRemove("available_packages", out var t2)) t2.TrySetResult(pkgs);   continue; }
-                    if (obj["ok"]     is { } ok)          { if (_cmdPending.TryRemove("install",            out var t3)) t3.TrySetResult(new JsonArray(ok.GetValue<bool>())) ; continue; }
-                    if (obj["pong"]   is not null)         { if (_cmdPending.TryRemove("ping",              out var t4)) t4.TrySetResult(new JsonArray()); continue; }
+                    if (obj["pairs"]    is JsonArray pairs) { if (_cmdPending.TryRemove("installed_pairs",    out var t1)) t1.TrySetResult(pairs); continue; }
+                    if (obj["packages"] is JsonArray pkgs)  { if (_cmdPending.TryRemove("available_packages", out var t2)) t2.TrySetResult(pkgs);  continue; }
+                    if (obj["ok"]       is { } ok)          { if (_cmdPending.TryRemove("install",            out var t3)) t3.TrySetResult(new JsonArray(ok.GetValue<bool>())); continue; }
+                    if (obj["pong"]     is not null)         { if (_cmdPending.TryRemove("ping",               out var t4)) t4.TrySetResult(new JsonArray()); continue; }
                 }
                 catch { }
             }
@@ -110,6 +117,30 @@ public class TranslatorBridge : IDisposable
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(60));
         cts.Token.Register(() => { _pending.TryRemove(id, out _); tcs.TrySetResult(text); });
+        return await tcs.Task;
+    }
+
+    /// <summary>
+    /// Ask Python/PyMuPDF to rasterize one PDF page to a temp PNG.
+    /// Returns the temp file path and image dimensions; empty path on failure.
+    /// Caller is responsible for deleting the temp file.
+    /// </summary>
+    public async Task<(string Path, int W, int H, int Dpi)> RasterizePdfPageAsync(
+        string pdfPath, int pageIndex, int dpi = 150,
+        CancellationToken ct = default)
+    {
+        if (!_ready) return ("", 0, 0, 0);
+        var id  = $"r_{Interlocked.Increment(ref _rasterCounter)}";
+        var tcs = new TaskCompletionSource<(string, int, int, int)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _rasterPending[id] = tcs;
+        var msg = JsonSerializer.Serialize(new {
+            cmd = "rasterize_page", id, path = pdfPath, page = pageIndex, dpi });
+        await _stdin!.WriteLineAsync(msg);
+        await _stdin.FlushAsync();
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(60));
+        cts.Token.Register(() => { _rasterPending.TryRemove(id, out _); tcs.TrySetResult(("", 0, 0, 0)); });
         return await tcs.Task;
     }
 
@@ -165,58 +196,10 @@ public class TranslatorBridge : IDisposable
         return arr.Count > 0 && arr[0]?.GetValue<bool>() == true;
     }
 
-    /// <summary>
-    /// OCR an image (supplied as raw bytes) and translate the recognised text.
-    /// Returns (original OCR text, translated text). Empty strings on failure.
-    /// </summary>
-    public async Task<(string Text, string Translated)> OcrImageAsync(
-        byte[] imageBytes, string[] fromLangs, string to,
-        CancellationToken ct = default)
-    {
-        if (!_ready || imageBytes.Length == 0) return ("", "");
-        var id  = $"ocr_{Interlocked.Increment(ref _ocrCounter)}";
-        var tcs = new TaskCompletionSource<(string, string)>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        _ocrPending[id] = tcs;
-        var b64 = Convert.ToBase64String(imageBytes);
-        var msg = JsonSerializer.Serialize(new {
-            cmd = "ocr", id, image_b64 = b64, from_langs = fromLangs, to });
-        await _stdin!.WriteLineAsync(msg);
-        await _stdin.FlushAsync();
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(TimeSpan.FromSeconds(120));
-        cts.Token.Register(() => { _ocrPending.TryRemove(id, out _); tcs.TrySetResult(("", "")); });
-        return await tcs.Task;
-    }
-
-    /// <summary>
-    /// Rasterise a PDF page via Python/PyMuPDF, OCR it, then translate.
-    /// Returns (original OCR text, translated text). Empty strings on failure.
-    /// </summary>
-    public async Task<(string Text, string Translated)> OcrPdfPageAsync(
-        string pdfPath, int pageIndex, string[] fromLangs, string to,
-        CancellationToken ct = default)
-    {
-        if (!_ready) return ("", "");
-        var id  = $"ocr_{Interlocked.Increment(ref _ocrCounter)}";
-        var tcs = new TaskCompletionSource<(string, string)>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        _ocrPending[id] = tcs;
-        var msg = JsonSerializer.Serialize(new {
-            cmd = "ocr_pdf_page", id, path = pdfPath, page = pageIndex,
-            from_langs = fromLangs, to });
-        await _stdin!.WriteLineAsync(msg);
-        await _stdin.FlushAsync();
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(TimeSpan.FromSeconds(120));
-        cts.Token.Register(() => { _ocrPending.TryRemove(id, out _); tcs.TrySetResult(("", "")); });
-        return await tcs.Task;
-    }
-
     public void Dispose()
     {
-        try { _stdin?.Close();    } catch { }
-        try { _process?.Kill();   } catch { }
+        try { _stdin?.Close();  } catch { }
+        try { _process?.Kill(); } catch { }
         _process?.Dispose();
     }
 }
