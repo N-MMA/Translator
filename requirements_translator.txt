@@ -1,0 +1,14 @@
+# DocTranslate — Python Translation Microservice
+# Install with: pip install -r requirements_translator.txt
+#
+# This is the ONLY Python component — it handles Argos Translate.
+# Everything else (GUI, DOCX, PDF) is handled by the C# WPF app.
+#
+# WHY ARGOS TRANSLATE (not an LLM):
+#   - Purpose-built seq2seq translation model — fast and consistent
+#   - Uses CTranslate2 runtime — CPU-optimised with int8 quantization
+#   - ~200MB RAM per language model
+#   - 2–5 seconds per page on old CPU (pre-2018)
+#   - 43 languages + automatic pivoting between installed pairs
+
+argostranslate>=1.9.0
